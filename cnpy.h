@@ -5,45 +5,114 @@
 #ifndef LIBCNPY_H_
 #define LIBCNPY_H_
 
+#include <cstring>
 #include <string>
-#include <stdexcept>
-#include <sstream>
 #include <vector>
-#include <cstdio>
 #include <typeinfo>
 #include <iostream>
-#include <cassert>
-#include <zlib.h>
+#include <algorithm>
+
 #include <map>
 
-namespace cnpy {
-
-struct NpyArray {
-    char* data;
-    std::vector<size_t> shape;
-    unsigned int word_size;
-    bool fortran_order;
-    void destruct() {delete[] data;}
-};
-
-struct npz_t : public std::map<std::string, NpyArray>
+namespace cnpy
 {
-    void destruct()
+
+class NpArray
+{
+public:
+    NpArray() :
+        mData(nullptr),
+        mElemSize(0),
+        mIsFortranOrder(false),
+        mHasDataOwnership(true)
+    {}
+
+    NpArray(const std::vector<size_t>& shape,
+            const size_t elSize,
+            const bool isFortran=false,
+            const unsigned char* data=nullptr) :
+        mShape(shape),
+        mElemSize(elSize),
+        mIsFortranOrder(isFortran),
+        mHasDataOwnership(true)
     {
-        npz_t::iterator it = this->begin();
-        for(; it != this->end(); ++it) (*it).second.destruct();
+        size_t dataSize = std::accumulate(mShape.begin(), mShape.end(), mElemSize, std::multiplies<size_t>());
+
+        mData = new unsigned char[dataSize];
+
+        if(data!=nullptr)
+            std::memcpy(mData, data, dataSize);
     }
+
+    ~NpArray()
+    {
+        if(mHasDataOwnership && mData!=nullptr)
+            delete[] mData;
+    }
+
+    NpArray(NpArray&& other)
+    {
+        swapData(other);
+    }
+
+    NpArray& operator=(NpArray&& other)
+    {
+        swapData(other);
+        return *this;
+    }
+
+    unsigned char* data() { return mData; }
+    const unsigned char* data() const { return mData; }
+
+    size_t shape(const size_t i) const { return mShape[i]; }
+    size_t nDims() const { return mShape.size(); }
+    size_t numElements() const
+    {
+        return std::accumulate(mShape.begin(), mShape.end(), 1, std::multiplies<size_t>());
+    }
+    size_t elemSize() const { return mElemSize; }
+    bool isFortranOrder() const { return mIsFortranOrder; }
+    bool hasDataOwnership() const { return mHasDataOwnership; }
+
+    void removeDataOwnership() { mHasDataOwnership = false; }
+
+    bool empty() { return mData==nullptr; }
+
+private:
+
+    void swapData(NpArray& other)
+    {
+        mData = other.mData;
+        other.mData = nullptr;
+
+        std::swap(mShape, other.mShape);
+
+        mElemSize = other.mElemSize;
+        other.mElemSize = 0;
+
+        mIsFortranOrder = other.mIsFortranOrder;
+        other.mIsFortranOrder = false;
+
+        mHasDataOwnership = other.mHasDataOwnership;
+        other.mHasDataOwnership = false;
+    }
+
+    unsigned char* mData;
+    std::vector<size_t> mShape;
+    size_t mElemSize;
+    bool mIsFortranOrder;
+
+    bool mHasDataOwnership;
 };
 
-/*
-std::vector<char> create_npy_header(const std::type_info& dataType, const size_t elementSize, const size_t* shape, const size_t ndims);
-void parse_npy_header(FILE* fp, size_t& word_size, size_t*& shape, size_t& ndims, bool& fortran_order);
-void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& global_header_size, unsigned int& global_header_offset);
-*/
 
-npz_t npz_load(const std::string& fname);
-NpyArray npz_load(const std::string& fname, const std::string& varname);
-NpyArray npy_load(const std::string& fname);
+typedef std::map<std::string, NpArray> NpArrayDict;
+typedef std::pair<std::string, NpArray> NpArrayDictItem;
+
+
+NpArrayDict npz_load(const std::string& fname);
+NpArray npz_load(const std::string& fname, const std::string& varname);
+NpArray npy_load(const std::string& fname);
 
 void npy_save_data(const std::string& fname,
                    const unsigned char* data,const std::type_info& typeInfo,
@@ -54,28 +123,18 @@ void npz_save_data(const std::string& zipname, const std::string& name,
                    const size_t elemSize, const size_t* shape, const size_t ndims,
                    const char mode='w');
 
-/*
-template<typename T> std::vector<char>& operator+=(std::vector<char>& lhs, const T rhs) {
-    //write in little endian
-    for(char byte = 0; byte < sizeof(T); byte++) {
-        char val = *((char*)&rhs+byte);
-        lhs.push_back(val);
-    }
-    return lhs;
-}
 
-template<> std::vector<char>& operator+=(std::vector<char>& lhs, const std::string rhs);
-template<> std::vector<char>& operator+=(std::vector<char>& lhs, const char* rhs);
-*/
-
-
-template<typename T> void npy_save(std::string fname, const T* data, const size_t* shape, const size_t ndims, const char mode='w')
+template<typename T> void npy_save(std::string fname,
+                                   const T* data, const size_t* shape, const size_t ndims,
+                                   const char mode='w')
 {
     npy_save_data(fname, reinterpret_cast<const unsigned char*>(data),
                   typeid(T), sizeof(T), shape, ndims, mode);
 }
 
-template<typename T> void npz_save(const std::string& zipname, const std::string& name, const T* data, const size_t* shape, const size_t ndims, const char mode='w')
+template<typename T> void npz_save(const std::string& zipname, const std::string& name,
+                                   const T* data, const size_t* shape, const size_t ndims,
+                                   const char mode='w')
 {
     npz_save_data(zipname, name, reinterpret_cast<const unsigned char*>(data),
                   typeid(T), sizeof(T), shape, ndims, mode);

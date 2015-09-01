@@ -6,15 +6,15 @@
 
 #include <complex>
 #include <cstdlib>
-#include <algorithm>
 #include <cstring>
 #include <iomanip>
+#include <stdexcept>
+#include <sstream>
+#include <cstdio>
+#include <cassert>
 
-/*
-static std::vector<char> create_npy_header(const std::type_info& dataType, const size_t elementSize, const size_t* shape, const size_t ndims);
-static void parse_npy_header(FILE* fp, size_t& word_size, size_t*& shape, size_t& ndims, bool& fortran_order);
-void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& global_header_size, unsigned int& global_header_offset);
-*/
+#include <zlib.h>
+
 
 static char BigEndianTest()
 {
@@ -190,25 +190,33 @@ static void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& glob
 }
 
 
-static cnpy::NpyArray load_the_npy_file(FILE* fp)
+static cnpy::NpArray load_the_npy_file(FILE* fp)
 {
     size_t* shape;
     size_t ndims, word_size;
     bool fortran_order;
-    parse_npy_header(fp,word_size,shape,ndims,fortran_order);
-    unsigned long long size = 1; //long long so no overflow when multiplying by word_size
-    for(unsigned int i = 0;i < ndims;i++) size *= shape[i];
+    parse_npy_header(fp, word_size, shape, ndims, fortran_order);
+    size_t size = 1; //long long so no overflow when multiplying by word_size
+    for(size_t i = 0;i <ndims; i++)
+        size *= shape[i];
 
-    cnpy::NpyArray arr;
-    arr.word_size = word_size;
-    arr.shape = std::vector<size_t>(shape, shape+ndims);
+    std::vector<size_t> shapeV(shape, shape+ndims);
+
+    cnpy::NpArray arr(shapeV, word_size, fortran_order);
+
     delete[] shape;
-    arr.data = new char[size*word_size];    
-    arr.fortran_order = fortran_order;
-    size_t nread = fread(arr.data,word_size,size,fp);
+
+    //cnpy::NpyArray arr;
+    //arr.word_size = word_size;
+    //arr.shape = std::vector<size_t>(shape, shape+ndims);
+    //delete[] shape;
+    //arr.data = new char[size*word_size];
+    //arr.fortran_order = fortran_order;
+    size_t nread = fread(arr.data(), arr.elemSize(), arr.numElements(), fp);
     if(nread != size)
         throw std::runtime_error("load_the_npy_file: failed fread");
-    return arr;
+
+    return std::move(arr);
 }
 
 
@@ -372,14 +380,14 @@ void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
 }
 
 
-cnpy::npz_t cnpy::npz_load(const std::string& fname)
+cnpy::NpArrayDict cnpy::npz_load(const std::string& fname)
 {
     FILE* fp = fopen(fname.c_str(),"rb");
 
     if(!fp) printf("npz_load: Error! Unable to open file %s!\n",fname.c_str());
     assert(fp);
 
-    cnpy::npz_t arrays;  
+    NpArrayDict arrays;
 
     while(1)
     {
@@ -411,14 +419,15 @@ cnpy::npz_t cnpy::npz_load(const std::string& fname)
                 throw std::runtime_error("npz_load: failed fread");
         }
 
-        arrays[varname] = load_the_npy_file(fp);
+        //arrays[varname] = std::move(load_the_npy_file(fp));
+        arrays.insert(cnpy::NpArrayDictItem(varname, std::move(load_the_npy_file(fp))));
     }
 
     fclose(fp);
-    return arrays;  
+    return std::move(arrays);
 }
 
-cnpy::NpyArray cnpy::npz_load(const std::string& fname, const std::string& varname)
+cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varname)
 {
     FILE* fp = fopen(fname.c_str(),"rb");
 
@@ -449,9 +458,9 @@ cnpy::NpyArray cnpy::npz_load(const std::string& fname, const std::string& varna
         fseek(fp,extra_field_len,SEEK_CUR); //skip past the extra field
 
         if(vname == varname) {
-            NpyArray array = load_the_npy_file(fp);
+            NpArray array = load_the_npy_file(fp);
             fclose(fp);
-            return array;
+            return std::move(array);
         }
         else {
             //skip past the data
@@ -461,21 +470,22 @@ cnpy::NpyArray cnpy::npz_load(const std::string& fname, const std::string& varna
     }
 
     fclose(fp);
-    printf("npz_load: Error! Variable name %s not found in %s!\n",varname.c_str(),fname.c_str());
-    abort();
+    printf("npz_load: Error! Variable name %s not found in %s!\n", varname.c_str(), fname.c_str());
+
+    return NpArray();
 }
 
-cnpy::NpyArray cnpy::npy_load(const std::string& fname)
+cnpy::NpArray cnpy::npy_load(const std::string& fname)
 {
 
     FILE* fp = fopen(fname.c_str(), "rb");
 
     if(!fp) {
         printf("npy_load: Error! Unable to open file %s!\n",fname.c_str());
-        abort();  
+        return NpArray();
     }
 
-    NpyArray arr = load_the_npy_file(fp);
+    NpArray arr = load_the_npy_file(fp);
 
     fclose(fp);
     return arr;
