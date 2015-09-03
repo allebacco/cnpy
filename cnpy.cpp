@@ -12,6 +12,7 @@
 #include <sstream>
 #include <cstdio>
 #include <cassert>
+#include <fstream>
 
 #include <zlib.h>
 
@@ -23,33 +24,35 @@ static char BigEndianTest()
     return y == 1 ? '<' : '>';
 }
 
-static char map_type(const std::type_info& t)
+
+static char map_type(const cnpy::Type& t)
 {
-    if(t == typeid(float) ) return 'f';
-    if(t == typeid(double) ) return 'f';
-    if(t == typeid(long double) ) return 'f';
-
-    if(t == typeid(int) ) return 'i';
-    if(t == typeid(char) ) return 'i';
-    if(t == typeid(short) ) return 'i';
-    if(t == typeid(long) ) return 'i';
-    if(t == typeid(long long) ) return 'i';
-
-    if(t == typeid(unsigned char) ) return 'u';
-    if(t == typeid(unsigned short) ) return 'u';
-    if(t == typeid(unsigned long) ) return 'u';
-    if(t == typeid(unsigned long long) ) return 'u';
-    if(t == typeid(unsigned int) ) return 'u';
-
-    if(t == typeid(bool) ) return 'b';
-
-    if(t == typeid(std::complex<float>) ) return 'c';
-    if(t == typeid(std::complex<double>) ) return 'c';
-    if(t == typeid(std::complex<long double>) ) return 'c';
-
-    else return '?';
+    switch (t)
+    {
+    case cnpy::Type::Int8:
+    case cnpy::Type::Int16:
+    case cnpy::Type::Int32:
+    case cnpy::Type::Int64:
+        return 'i';
+    case cnpy::Type::Uint8:
+    case cnpy::Type::Uint16:
+    case cnpy::Type::Uint32:
+    case cnpy::Type::Uint64:
+        return 'u';
+    case cnpy::Type::Float:
+    case cnpy::Type::Double:
+    case cnpy::Type::LongDouble:
+        return 'f';
+    case cnpy::Type::ComplexFloat:
+    case cnpy::Type::ComplexDouble:
+    case cnpy::Type::ComplexLongDouble:
+        return 'c';
+    case cnpy::Type::Bool:
+        return 'b';
+    default:
+        return '?';
+    }
 }
-
 
 template<typename T> static std::vector<char>& operator+=(std::vector<char>& lhs, const T rhs) {
     //write in little endian
@@ -88,13 +91,16 @@ template<typename T> std::string tostring(T i, int pad = 0, char padval = ' ')
 }
 
 
-static std::vector<char> create_npy_header(const std::type_info& dataType, const size_t elementSize, const size_t* shape, const size_t ndims)
+static std::vector<char> create_npy_header(const cnpy::Type dtype,
+                                           const size_t elementSize,
+                                           const std::vector<size_t> shape)
 {
+    size_t ndims = shape.size();
 
     std::vector<char> dict;
     dict += "{'descr': '";
     dict += BigEndianTest();
-    dict += map_type(dataType);
+    dict += map_type(dtype);
     dict += tostring(elementSize);
     dict += "', 'fortran_order': False, 'shape': (";
     dict += tostring(shape[0]);
@@ -122,13 +128,13 @@ static std::vector<char> create_npy_header(const std::type_info& dataType, const
 }
 
 
-static void parse_npy_header(FILE* fp, size_t& word_size, size_t*& shape, size_t& ndims, bool& fortran_order)
+static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_t>& shape, bool& fortran_order)
 {
     char buffer[256];
-    size_t res = fread(buffer,sizeof(char),11,fp);       
+    size_t res = std::fread(buffer, sizeof(char), 11, fp);
     if(res != 11)
         throw std::runtime_error("parse_npy_header: failed fread");
-    std::string header = fgets(buffer,256,fp);
+    std::string header = std::fgets(buffer, 256, fp);
     assert(header[header.size()-1] == '\n');
 
     int loc1, loc2;
@@ -141,12 +147,16 @@ static void parse_npy_header(FILE* fp, size_t& word_size, size_t*& shape, size_t
     loc1 = header.find("(");
     loc2 = header.find(")");
     std::string str_shape = header.substr(loc1+1,loc2-loc1-1);
-    if(str_shape[str_shape.size()-1] == ',') ndims = 1;
-    else ndims = std::count(str_shape.begin(),str_shape.end(),',')+1;
-    shape = new size_t[ndims];
-    for(unsigned int i = 0;i < ndims;i++) {
+    int ndims = 0;
+    if(str_shape[str_shape.size()-1] == ',')
+        ndims = 1;
+    else
+        ndims = std::count(str_shape.begin(), str_shape.end(), ',') + 1;
+    shape.resize(ndims);
+    for(int i = 0;i < ndims; i++)
+    {
         loc1 = str_shape.find(",");
-        shape[i] = atoi(str_shape.substr(0,loc1).c_str());
+        shape[i] = std::stoull(str_shape.substr(0, loc1));
         str_shape = str_shape.substr(loc1+1);
     }
 
@@ -157,12 +167,11 @@ static void parse_npy_header(FILE* fp, size_t& word_size, size_t*& shape, size_t
     bool littleEndian = (header[loc1] == '<' || header[loc1] == '|' ? true : false);
     assert(littleEndian);
 
-    //char type = header[loc1+1];
-    //assert(type == map_type(T));
+    char type = header[loc1+1];
 
     std::string str_ws = header.substr(loc1+2);
     loc2 = str_ws.find("'");
-    word_size = atol(str_ws.substr(0,loc2).c_str());
+    word_size = std::stoull(str_ws.substr(0,loc2));
 }
 
 
@@ -190,39 +199,27 @@ static void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& glob
 }
 
 
-static cnpy::NpArray load_the_npy_file(FILE* fp)
+static cnpy::NpArray load_the_npy_file(std::FILE* fp)
 {
-    size_t* shape;
-    size_t ndims, word_size;
+    std::vector<size_t> shape;
+    size_t word_size;
     bool fortran_order;
-    parse_npy_header(fp, word_size, shape, ndims, fortran_order);
-    size_t size = 1; //long long so no overflow when multiplying by word_size
-    for(size_t i = 0;i <ndims; i++)
-        size *= shape[i];
+    parse_npy_header(fp, word_size, shape, fortran_order);
 
-    std::vector<size_t> shapeV(shape, shape+ndims);
+    cnpy::NpArray arr(shape, word_size, fortran_order);
 
-    cnpy::NpArray arr(shapeV, word_size, fortran_order);
+    const size_t num = arr.numElements();
+    const size_t nread = std::fread(arr.data(), word_size, num, fp);
+    if(nread != num)
+        throw std::runtime_error("npy file read error: expected "+std::to_string(arr.size())+", read "+std::to_string(nread));
 
-    delete[] shape;
-
-    //cnpy::NpyArray arr;
-    //arr.word_size = word_size;
-    //arr.shape = std::vector<size_t>(shape, shape+ndims);
-    //delete[] shape;
-    //arr.data = new char[size*word_size];
-    //arr.fortran_order = fortran_order;
-    size_t nread = fread(arr.data(), arr.elemSize(), arr.numElements(), fp);
-    if(nread != size)
-        throw std::runtime_error("load_the_npy_file: failed fread");
-
-    return std::move(arr);
+    return arr;
 }
 
 
 void cnpy::npy_save_data(const std::string& fname,
-                         const unsigned char* data,const std::type_info& typeInfo,
-                         const size_t elemSize, const size_t* shape, const size_t ndims,
+                         const unsigned char* data, const Type dtype,
+                         const size_t elemSize, const std::vector<size_t>& shape,
                          const char mode)
 {
     FILE* fp = NULL;
@@ -233,56 +230,47 @@ void cnpy::npy_save_data(const std::string& fname,
     if(fp)
     {
         //file exists. we need to append to it. read the header, modify the array size
-        size_t word_size, tmp_dims;
-        size_t* tmp_shape = 0;
+        size_t word_size;
+        std::vector<size_t> tmp_shape;
         bool fortran_order;
-        parse_npy_header(fp, word_size, tmp_shape, tmp_dims, fortran_order);
+        parse_npy_header(fp, word_size, tmp_shape, fortran_order);
         assert(!fortran_order);
 
         if(word_size != elemSize) {
             std::cout<<"libnpy error: "<<fname<<" has word size "<<word_size<<" but npy_save appending data sized "<<elemSize<<"\n";
             assert( word_size == elemSize );
         }
-        if(tmp_dims != ndims) {
-            std::cout<<"libnpy error: npy_save attempting to append misdimensioned data to "<<fname<<"\n";
-            assert(tmp_dims == ndims);
-        }
+        if(tmp_shape.size() != shape.size())
+            throw std::runtime_error("Attempting to append misdimensioned data to "+fname);
 
-        for(int i = 1; i < ndims; i++)
+        for(int i=1; i<shape.size(); ++i)
         {
-            if(shape[i] != tmp_shape[i]) {
-                std::cout<<"libnpy error: npy_save attempting to append misshaped data to "<<fname<<"\n";
-                assert(shape[i] == tmp_shape[i]);
-            }
+            if(shape[i] != tmp_shape[i])
+                throw std::runtime_error("Attempting to append misshaped data to "+fname);
         }
         tmp_shape[0] += shape[0];
 
         fseek(fp, 0, SEEK_SET);
-        std::vector<char> header = create_npy_header(typeInfo, elemSize, tmp_shape, ndims);
+        std::vector<char> header = create_npy_header(dtype, elemSize, tmp_shape);
         fwrite(header.data(), sizeof(char), header.size(), fp);
         fseek(fp, 0, SEEK_END);
-
-        delete[] tmp_shape;
     }
     else
     {
         fp = fopen(fname.c_str(),"wb");
-        std::vector<char> header = create_npy_header(typeInfo, elemSize, shape, ndims);
+        std::vector<char> header = create_npy_header(dtype, elemSize, shape);
         fwrite(header.data(), sizeof(char), header.size(), fp);
     }
 
-    size_t nels = 1;
-    for(int i = 0;i < ndims;i++)
-        nels *= shape[i];
-
+    size_t nels = std::accumulate(shape.cbegin(), shape.cend(), 1U, std::multiplies<size_t>());
     std::fwrite(data, elemSize, nels, fp);
     fclose(fp);
 }
 
 
 void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
-                         const unsigned char* data,const std::type_info& typeInfo,
-                         const size_t elemSize, const size_t* shape, const size_t ndims,
+                         const unsigned char* data, const cnpy::Type dtype,
+                         const size_t elemSize, const std::vector<size_t>& shape,
                          const char mode)
 {
     //first, append a .npy to the fname
@@ -296,7 +284,7 @@ void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
     std::vector<char> global_header;
 
     if(mode == 'a')
-        fp = fopen(zipname.c_str(),"r+b");
+        fp = fopen(zipname.c_str(), "r+b");
 
     if(fp)
     {
@@ -309,21 +297,19 @@ void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
         fseek(fp, global_header_offset, SEEK_SET);
         global_header.resize(global_header_size);
         size_t res = fread(global_header.data(), sizeof(char), global_header_size, fp);
-        if(res != global_header_size){
+        if(res != global_header_size)
             throw std::runtime_error("npz_save: header read error while adding to existing zip");
-        }
+
         fseek(fp, global_header_offset, SEEK_SET);
     }
     else
     {
-        fp = fopen(zipname.c_str(),"wb");
+        fp = fopen(zipname.c_str(), "wb");
     }
 
-    std::vector<char> npy_header = create_npy_header(typeInfo, elemSize, shape, ndims);
+    std::vector<char> npy_header = create_npy_header(dtype, elemSize, shape);
 
-    size_t nels = 1;
-    for (unsigned int m=0; m<ndims; m++)
-        nels *= shape[m];
+    size_t nels = std::accumulate(shape.cbegin(), shape.cend(), 1U, std::multiplies<size_t>());
     size_t nbytes = nels*elemSize + npy_header.size();
 
     //get the CRC of the data to be added
@@ -420,7 +406,7 @@ cnpy::NpArrayDict cnpy::npz_load(const std::string& fname)
         }
 
         //arrays[varname] = std::move(load_the_npy_file(fp));
-        arrays.insert(cnpy::NpArrayDictItem(varname, std::move(load_the_npy_file(fp))));
+        arrays.insert(cnpy::NpArrayDictItem(varname, load_the_npy_file(fp)));
     }
 
     fclose(fp);
@@ -431,12 +417,13 @@ cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varnam
 {
     FILE* fp = fopen(fname.c_str(),"rb");
 
-    if(!fp) {
+    if(!fp)
+    {
         printf("npz_load: Error! Unable to open file %s!\n",fname.c_str());
-        abort();
     }       
 
-    while(1) {
+    while(1)
+    {
         std::vector<char> local_header(30);
         size_t header_res = fread(&local_header[0],sizeof(char),30,fp);
         if(header_res != 30)
@@ -477,7 +464,6 @@ cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varnam
 
 cnpy::NpArray cnpy::npy_load(const std::string& fname)
 {
-
     FILE* fp = fopen(fname.c_str(), "rb");
 
     if(!fp) {

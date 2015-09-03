@@ -21,8 +21,8 @@ int main()
     std::cout<<"sizeof(size_t): "<<sizeof(size_t)<<std::endl;
 
     //save it to file
-    const size_t shape[] = {Nz, Ny, Nx};
-    cnpy::npy_save("arr1.npy",data,shape,3,'w');
+    const std::vector<size_t> shape = {Nz, Ny, Nx};
+    cnpy::npy_save("arr1.npy",data, shape, 'w');
 
     //load it into a new array
     cnpy::NpArray arr = cnpy::npy_load("arr1.npy");
@@ -31,20 +31,21 @@ int main()
     //make sure the loaded data matches the saved data
     assert(arr.elemSize() == sizeof(std::complex<double>));
     assert(arr.nDims() == 3 && arr.shape(0) == Nz && arr.shape(1) == Ny && arr.shape(2) == Nx);
-    for(int i = 0; i < Nx*Ny*Nz;i++) assert(data[i] == loaded_data[i]);
+    for(int i = 0; i < Nx*Ny*Nz;i++)
+        assert(data[i] == loaded_data[i]);
 
     //append the same data to file
     //npy array on file now has shape (Nz+Nz,Ny,Nx)
-    cnpy::npy_save("arr1.npy", data, shape, 3, 'a');
+    cnpy::npy_save("arr1.npy", data, shape, 'a');
 
     //now write to an npz file
     //non-array variables are treated as 1D arrays with 1 element
     double myVar1 = 1.2;
     char myVar2 = 'a';
-    size_t shape2[] = {1};
-    cnpy::npz_save("out.npz","myVar1",&myVar1,shape2,1,'w'); //"w" overwrites any existing file
-    cnpy::npz_save("out.npz","myVar2",&myVar2,shape2,1,'a'); //"a" appends to the file we created above
-    cnpy::npz_save("out.npz","arr1",data,shape,3,'a'); //"a" appends to the file we created above
+    std::vector<size_t> shape2 = {1};
+    cnpy::npz_save("out.npz","myVar1", &myVar1, shape2, 'w'); //"w" overwrites any existing file
+    cnpy::npz_save("out.npz","myVar2", &myVar2, shape2, 'a'); //"a" appends to the file we created above
+    cnpy::npz_save("out.npz","arr1", data, shape, 'a'); //"a" appends to the file we created above
 
     //load a single var from the npz file
     cnpy::NpArray arr2 = cnpy::npz_load("out.npz", "arr1");
@@ -57,12 +58,6 @@ int main()
     double* mv1 = reinterpret_cast<double*>(arr_mv1.data());
     assert(arr_mv1.nDims() == 1 && arr_mv1.shape(0) == 1);
     assert(mv1[0] == myVar1);
-
-    //cleanup: note that we are responsible for deleting all loaded data
-    //delete[] data;
-    //delete[] loaded_data;
-    //arr2.destruct();
-    //my_npz.destruct();
 
     return 0;
 }
