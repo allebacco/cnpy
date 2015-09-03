@@ -50,6 +50,12 @@ int main()
     //load a single var from the npz file
     cnpy::NpArray arr2 = cnpy::npz_load("out.npz", "arr1");
 
+    cnpy::NpArray npMyVar1 = cnpy::npz_load("out.npz", "myVar1");
+    double* myVar1Data = reinterpret_cast<double*>(npMyVar1.data());
+    assert(npMyVar1.nDims() == 1 && npMyVar1.shape(0) == 1);
+    assert(myVar1Data[0] == myVar1);
+    assert(npMyVar1.size()==sizeof(double));
+
     //load the entire npz file
     cnpy::NpArrayDict my_npz = cnpy::npz_load("out.npz");
 

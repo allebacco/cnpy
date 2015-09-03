@@ -15,7 +15,57 @@
 #include <fstream>
 
 #include <zlib.h>
+#include <zip.h>
 
+static int closefile(int fp)
+{
+    return ::close(fp);
+}
+
+static int closefile(std::FILE* fp)
+{
+    return std::fclose(fp);
+}
+
+static int closefile(struct zip* fp)
+{
+    return zip_close(fp);
+}
+
+static int closefile(struct zip_file* fp)
+{
+    return zip_fclose(fp);
+}
+
+template<typename _Tp>
+class Handler
+{
+public:
+    Handler(_Tp* z=nullptr): h(z) {}
+    ~Handler() { if(h) closefile(h); }
+    _Tp* handle() { return h; }
+    Handler& operator=(const _Tp& z)
+    {
+        this->h = z;
+        return *this;
+    }
+private:
+    _Tp* h=nullptr;
+};
+
+
+struct NpHeader_
+{
+    uint8_t x93;
+    int8_t numpy[5];
+    uint8_t majorVersion;
+    uint8_t minorVersion;
+    uint16_t dictSize;
+};
+
+typedef struct NpHeader_ NpHeader;
+
+static_assert(sizeof(NpHeader)==(1+5+1+1+2), "The npy header struct must be 10 bytes");
 
 static char BigEndianTest()
 {
@@ -174,6 +224,46 @@ static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_
     word_size = std::stoull(str_ws.substr(0,loc2));
 }
 
+static void parseDictHeader(const std::string& dict, size_t& word_size, std::vector<size_t>& shape, bool& fortran_order)
+{
+    int loc1, loc2;
+
+    //fortran order
+    loc1 = dict.find("fortran_order") + 16;
+    fortran_order = dict.substr(loc1, 5) == "True";
+
+    //shape
+    loc1 = dict.find("(");
+    loc2 = dict.find(")");
+    std::string str_shape = dict.substr(loc1+1, loc2-loc1-1);
+    int ndims = 0;
+    if(str_shape[str_shape.size()-1] == ',')
+        ndims = 1;
+    else
+        ndims = std::count(str_shape.begin(), str_shape.end(), ',') + 1;
+    shape.resize(ndims);
+    for(int i = 0;i < ndims; i++)
+    {
+        loc1 = str_shape.find(",");
+        shape[i] = std::stoull(str_shape.substr(0, loc1));
+        str_shape = str_shape.substr(loc1+1);
+    }
+
+    //endian, word size, data type
+    //byte order code | stands for not applicable.
+    //not sure when this applies except for byte array
+    loc1 = dict.find("descr")+9;
+    bool littleEndian = dict[loc1] == '<' || dict[loc1] == '|';
+    if(!littleEndian)
+        throw std::runtime_error("Big endian data can note be managed.");
+
+    //char type = dict[loc1+1];
+
+    std::string str_ws = dict.substr(loc1+2);
+    loc2 = str_ws.find("'");
+    word_size = std::stoull(str_ws.substr(0, loc2));
+}
+
 
 static void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& global_header_size, unsigned int& global_header_offset)
 {
@@ -211,6 +301,34 @@ static cnpy::NpArray load_the_npy_file(std::FILE* fp)
     const size_t num = arr.numElements();
     const size_t nread = std::fread(arr.data(), word_size, num, fp);
     if(nread != num)
+        throw std::runtime_error("npy file read error: expected "+std::to_string(arr.size())+", read "+std::to_string(nread));
+
+    return arr;
+}
+
+static cnpy::NpArray load_the_npy_file(Handler<struct zip_file>& zipFile)
+{
+    std::vector<size_t> shape;
+    size_t word_size;
+    bool fortran_order;
+
+    NpHeader header;
+    zip_int64_t nread = zip_fread(zipFile.handle(), &header, sizeof(NpHeader));
+    if(nread != sizeof(NpHeader))
+         throw std::runtime_error("Error reading npy header in npz file");
+
+    std::string dict;
+    dict.resize(header.dictSize, ' ');
+    nread = zip_fread(zipFile.handle(), &dict[0], header.dictSize);
+    if(nread != header.dictSize)
+         throw std::runtime_error("Error reading npy dict header in npz file");
+
+    parseDictHeader(dict, word_size, shape, fortran_order);
+
+    cnpy::NpArray arr(shape, word_size, fortran_order);
+
+    nread = zip_fread(zipFile.handle(), arr.data(), arr.size());
+    if(nread != arr.size())
         throw std::runtime_error("npy file read error: expected "+std::to_string(arr.size())+", read "+std::to_string(nread));
 
     return arr;
@@ -413,6 +531,7 @@ cnpy::NpArrayDict cnpy::npz_load(const std::string& fname)
     return std::move(arrays);
 }
 
+/*
 cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varname)
 {
     FILE* fp = fopen(fname.c_str(),"rb");
@@ -460,6 +579,25 @@ cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varnam
     printf("npz_load: Error! Variable name %s not found in %s!\n", varname.c_str(), fname.c_str());
 
     return NpArray();
+}
+*/
+
+
+cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varname)
+{
+    Handler<struct zip> zip = zip_open(fname.c_str(), ZIP_CHECKCONS, nullptr);
+    if(zip.handle()==nullptr)
+        throw std::runtime_error("Error opening npz file "+fname);
+
+    std::string key = varname + ".npy";
+    int nameLookup = zip_name_locate(zip.handle(), key.c_str(), 0);
+    if(nameLookup<0)
+        throw std::runtime_error("Variable name "+varname+" not found in "+fname);
+
+    Handler<struct zip_file> zipFile = zip_fopen_index(zip.handle(), nameLookup, 0);
+
+    NpArray array = load_the_npy_file(zipFile);
+    return array;
 }
 
 cnpy::NpArray cnpy::npy_load(const std::string& fname)
