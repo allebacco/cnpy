@@ -168,8 +168,6 @@ private:
 
 
 typedef std::map<std::string, NpArray> NpArrayDict;
-typedef std::pair<std::string, NpArray> NpArrayDictItem;
-
 
 NpArrayDict npz_load(const std::string& fname);
 NpArray npz_load(const std::string& fname, const std::string& varname);

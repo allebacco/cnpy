@@ -17,6 +17,8 @@
 #include <zlib.h>
 #include <zip.h>
 
+typedef std::pair<std::string, cnpy::NpArray> NpArrayDictItem;
+
 static int closefile(int fp)
 {
     return ::close(fp);
@@ -483,104 +485,29 @@ void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
     fclose(fp);
 }
 
-
 cnpy::NpArrayDict cnpy::npz_load(const std::string& fname)
 {
-    FILE* fp = fopen(fname.c_str(),"rb");
-
-    if(!fp) printf("npz_load: Error! Unable to open file %s!\n",fname.c_str());
-    assert(fp);
+    Handler<struct zip> zip = zip_open(fname.c_str(), ZIP_CHECKCONS, nullptr);
+    if(zip.handle()==nullptr)
+        throw std::runtime_error("Error opening npz file "+fname);
 
     NpArrayDict arrays;
-
-    while(1)
+    zip_uint64_t numFiles = zip_get_num_entries(zip.handle(), 0);
+    for(zip_uint64_t fid=0; fid<numFiles; ++fid)
     {
-        std::vector<char> local_header(30);
-        size_t headerres = fread(&local_header[0],sizeof(char),30,fp);
-        if(headerres != 30)
-            throw std::runtime_error("npz_load: failed fread");
+        const char* arrName = zip_get_name(zip.handle(), fid, 0);
+        if(arrName==nullptr)
+            continue;
 
-        //if we've reached the global header, stop reading
-        if(local_header[2] != 0x03 || local_header[3] != 0x04) break;
+        Handler<struct zip_file> zipFile = zip_fopen_index(zip.handle(), fid, 0);
 
-        //read in the variable name
-        unsigned short name_len = *(unsigned short*)(&local_header.data()[26]);
-        std::string varname(name_len, ' ');
-        size_t vname_res = fread(&varname[0], sizeof(char), name_len, fp);
-        if(vname_res != name_len)
-            throw std::runtime_error("npz_load: failed fread");
-
-        //erase the lagging .npy        
-        varname.erase(varname.end()-4,varname.end());
-
-        //read in the extra field
-        unsigned short extra_field_len = *(unsigned short*) &local_header[28];
-        if(extra_field_len > 0)
-        {
-            std::vector<char> buff(extra_field_len);
-            size_t efield_res = fread(&buff[0],sizeof(char),extra_field_len,fp);
-            if(efield_res != extra_field_len)
-                throw std::runtime_error("npz_load: failed fread");
-        }
-
-        //arrays[varname] = std::move(load_the_npy_file(fp));
-        arrays.insert(cnpy::NpArrayDictItem(varname, load_the_npy_file(fp)));
+        std::string name = arrName;
+        name.erase(name.size()-4);
+        arrays.insert(NpArrayDictItem(name, load_the_npy_file(zipFile)));
     }
 
-    fclose(fp);
-    return std::move(arrays);
+    return arrays;
 }
-
-/*
-cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varname)
-{
-    FILE* fp = fopen(fname.c_str(),"rb");
-
-    if(!fp)
-    {
-        printf("npz_load: Error! Unable to open file %s!\n",fname.c_str());
-    }       
-
-    while(1)
-    {
-        std::vector<char> local_header(30);
-        size_t header_res = fread(&local_header[0],sizeof(char),30,fp);
-        if(header_res != 30)
-            throw std::runtime_error("npz_load: failed fread");
-
-        //if we've reached the global header, stop reading
-        if(local_header[2] != 0x03 || local_header[3] != 0x04) break;
-
-        //read in the variable name
-        unsigned short name_len = *(unsigned short*) &local_header[26];
-        std::string vname(name_len,' ');
-        size_t vname_res = fread(&vname[0],sizeof(char),name_len,fp);      
-        if(vname_res != name_len)
-            throw std::runtime_error("npz_load: failed fread");
-        vname.erase(vname.end()-4,vname.end()); //erase the lagging .npy
-
-        //read in the extra field
-        unsigned short extra_field_len = *(unsigned short*) &local_header[28];
-        fseek(fp,extra_field_len,SEEK_CUR); //skip past the extra field
-
-        if(vname == varname) {
-            NpArray array = load_the_npy_file(fp);
-            fclose(fp);
-            return std::move(array);
-        }
-        else {
-            //skip past the data
-            unsigned int size = *(unsigned int*) &local_header[22];
-            fseek(fp,size,SEEK_CUR);
-        }
-    }
-
-    fclose(fp);
-    printf("npz_load: Error! Variable name %s not found in %s!\n", varname.c_str(), fname.c_str());
-
-    return NpArray();
-}
-*/
 
 
 cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varname)
