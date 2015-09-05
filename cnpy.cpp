@@ -16,6 +16,7 @@
 
 #include <zlib.h>
 #include <zip.h>
+#include <zzip/zzip.h>
 
 typedef std::pair<std::string, cnpy::NpArray> NpArrayDictItem;
 
@@ -39,6 +40,13 @@ static int closefile(struct zip_file* fp)
     return zip_fclose(fp);
 }
 
+static int closefile(struct zip_source* fp)
+{
+    // zip_source is reference counted.
+    //zip_source_free(fp);
+    return 0;
+}
+
 template<typename _Tp>
 class Handler
 {
@@ -51,6 +59,7 @@ public:
         this->h = z;
         return *this;
     }
+    void close() { closefile(h); h = nullptr; }
 private:
     _Tp* h=nullptr;
 };
@@ -58,11 +67,11 @@ private:
 
 struct NpHeader_
 {
-    uint8_t x93;
-    int8_t numpy[5];
-    uint8_t majorVersion;
-    uint8_t minorVersion;
-    uint16_t dictSize;
+    uint8_t x93 = 0x93;
+    int8_t numpy[5] = {'N', 'U', 'M', 'P', 'Y'};
+    uint8_t majorVersion = 0x01;
+    uint8_t minorVersion = 0x00;
+    uint16_t dictSize = 0;
 };
 
 typedef struct NpHeader_ NpHeader;
@@ -142,14 +151,13 @@ template<typename T> std::string tostring(T i, int pad = 0, char padval = ' ')
     return s.str();
 }
 
-
 static std::vector<char> create_npy_header(const cnpy::Type dtype,
                                            const size_t elementSize,
-                                           const std::vector<size_t> shape)
+                                           const std::vector<size_t>& shape)
 {
     size_t ndims = shape.size();
 
-    std::vector<char> dict;
+    std::string dict;
     dict += "{'descr': '";
     dict += BigEndianTest();
     dict += map_type(dtype);
@@ -157,26 +165,26 @@ static std::vector<char> create_npy_header(const cnpy::Type dtype,
     dict += "', 'fortran_order': False, 'shape': (";
     dict += tostring(shape[0]);
     for(int i=1; i<ndims; i++)
-    {
-        dict += ", ";
-        dict += tostring(shape[i]);
-    }
-    if(ndims == 1) dict += ",";
+        dict += ", " + tostring(shape[i]);
+    if(ndims == 1)
+        dict += ",";
     dict += "), }";
     //pad with spaces so that preamble+dict is modulo 16 bytes. preamble is 10 bytes. dict needs to end with \n
     int remainder = 16 - (10 + dict.size()) % 16;
-    dict.insert(dict.end(),remainder,' ');
-    dict.back() = '\n';
+    //dict.insert(dict.end(), remainder, ' ');
+    for(int i=0; i<remainder-1; ++i)
+        dict += ' ';
+    dict += '\n';
 
-    std::vector<char> header;
-    header += (char) 0x93;
-    header += "NUMPY";
-    header += (char) 0x01; //major version of numpy format
-    header += (char) 0x00; //minor version of numpy format
-    header += (unsigned short) dict.size();
-    header.insert(header.end(),dict.begin(),dict.end());
+    NpHeader header;
+    header.dictSize = dict.size();
 
-    return header;
+    std::vector<char> bytes;
+    bytes.resize(sizeof(NpHeader) + dict.size());
+    std::memcpy(bytes.data(), &header, sizeof(NpHeader));
+    std::memcpy(bytes.data()+sizeof(NpHeader), dict.data(), dict.size());
+
+    return bytes;
 }
 
 
@@ -186,7 +194,7 @@ static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_
     size_t res = std::fread(buffer, sizeof(char), 11, fp);
     if(res != 11)
         throw std::runtime_error("parse_npy_header: failed fread");
-    std::string header = std::fgets(buffer, 256, fp);
+    const std::string header = std::fgets(buffer, 256, fp);
     assert(header[header.size()-1] == '\n');
 
     int loc1, loc2;
@@ -216,10 +224,10 @@ static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_
     //byte order code | stands for not applicable. 
     //not sure when this applies except for byte array
     loc1 = header.find("descr")+9;
-    bool littleEndian = (header[loc1] == '<' || header[loc1] == '|' ? true : false);
+    bool littleEndian = header[loc1] == '<' || header[loc1] == '|';//;) // ? true : false);
     assert(littleEndian);
 
-    char type = header[loc1+1];
+    //char type = header[loc1+1];
 
     std::string str_ws = header.substr(loc1+2);
     loc2 = str_ws.find("'");
@@ -387,7 +395,7 @@ void cnpy::npy_save_data(const std::string& fname,
     fclose(fp);
 }
 
-
+/*
 void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
                          const unsigned char* data, const cnpy::Type dtype,
                          const size_t elemSize, const std::vector<size_t>& shape,
@@ -484,6 +492,138 @@ void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
     fwrite(footer.data(), sizeof(char), footer.size(), fp);
     fclose(fp);
 }
+*/
+
+class ZipSourceCallbackData
+{
+public:
+    ZipSourceCallbackData(const std::vector<char>& h, const unsigned char* d, const size_t dSize):
+        header(h),
+        data(d),
+        dataSize(dSize),
+        offset(0),
+        headerIsDone(false)
+    {}
+
+    const std::vector<char> header;
+    const unsigned char* data;
+    const size_t dataSize;
+
+    size_t offset = 0;
+    bool headerIsDone = false;
+};
+
+static zip_int64_t zipSourceCallback(void* userdata, void* data, zip_uint64_t len, zip_source_cmd cmd)
+{
+    ZipSourceCallbackData* cbData = reinterpret_cast<ZipSourceCallbackData*>(userdata);
+    switch (cmd) {
+    case ZIP_SOURCE_OPEN:
+        std::cout<<"ZIP_SOURCE_OPEN"<<std::endl;
+        cbData->offset = 0;
+        cbData->headerIsDone = false;
+        std::cout<<"\t"<<cbData->header.size()<<" "<<cbData->dataSize<<std::endl;
+        break;
+    case ZIP_SOURCE_READ: {
+        std::cout<<"ZIP_SOURCE_READ "<<len<<" ";
+        if(cbData->headerIsDone)
+        {
+            size_t remain = cbData->dataSize-cbData->offset;
+            size_t toCopy = std::min((size_t)len, remain);
+            if(toCopy>0)
+                std::memcpy(data, &cbData->data[cbData->offset], toCopy);
+            cbData->offset += toCopy;
+            std::cout<<toCopy<<" "<<cbData->offset<<" d"<<std::endl;
+            return toCopy;
+        }
+        else
+        {
+            size_t remain = cbData->header.size()-cbData->offset;
+            size_t toCopy = std::min((size_t)len, remain);
+            if(toCopy>0)
+                std::memcpy(data, &cbData->header[cbData->offset], toCopy);
+            cbData->offset += toCopy;
+            if(cbData->offset==cbData->header.size())
+            {
+                cbData->headerIsDone = true;
+                cbData->offset = 0;
+            }
+            std::cout<<toCopy<<" "<<cbData->offset<<" h"<<std::endl;
+            return toCopy;
+        }
+    }
+    case ZIP_SOURCE_CLOSE:
+        std::cout<<"ZIP_SOURCE_CLOSE"<<std::endl;
+        break;
+    case ZIP_SOURCE_STAT: {
+        std::cout<<"ZIP_SOURCE_STAT"<<std::endl;
+        struct zip_stat* zs = reinterpret_cast<struct zip_stat*>(data);
+        zip_stat_init(zs);
+        zs->encryption_method = ZIP_EM_NONE;
+        //zs->index;			/* index within archive */
+        zs->size = cbData->dataSize + cbData->header.size(); /* size of file (uncompressed) */
+        //zs->comp_size;		/* size of file (compressed) */
+        zs->mtime = std::time(nullptr);
+        //zs->crc;			/* crc of file data */
+        zs->comp_method = ZIP_CM_STORE; /* compression method used */
+        zs->valid = ZIP_STAT_SIZE | ZIP_STAT_MTIME | ZIP_STAT_COMP_METHOD | ZIP_STAT_ENCRYPTION_METHOD;
+        return 0;
+    }
+    case ZIP_SOURCE_ERROR:
+        std::cout<<"ZIP_SOURCE_ERROR"<<std::endl;
+        break;
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+
+void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
+                         const unsigned char* data, const cnpy::Type dtype,
+                         const size_t elemSize, const std::vector<size_t>& shape,
+                         const char mode)
+{
+    //first, append a .npy to the fname
+    std::string fname(name);
+    fname += ".npy";
+
+    if(mode=='w' && std::ifstream(zipname).is_open())
+    {
+        // Remove the old file if present
+        if(std::remove(zipname.c_str())!=0)
+            throw std::runtime_error("Unable to overwrite "+zipname);
+    }
+
+    Handler<struct zip> zip = zip_open(zipname.c_str(), ZIP_CREATE, nullptr);
+    if(zip.handle()==nullptr)
+        throw std::runtime_error("Error opening npz file "+zipname);
+
+    // Remove the old array if present
+    int nameLookup = zip_name_locate(zip.handle(), fname.c_str(), 0);
+    if(nameLookup>=0 && zip_delete(zip.handle(), nameLookup)!=0)
+        throw std::runtime_error("Unable to overwrite "+name+" array");
+
+    std::vector<char> header = create_npy_header(dtype, elemSize, shape);
+
+    const int dataSize = std::accumulate(shape.cbegin(), shape.cend(), elemSize, std::multiplies<size_t>());
+    ZipSourceCallbackData cbData(header, data, dataSize);
+
+    Handler<struct zip_source> zipSource = zip_source_function(zip.handle(), zipSourceCallback, &cbData);
+    if(zipSource.handle()==nullptr)
+        throw std::runtime_error("Error creating "+name+" array");
+
+    zip_int64_t fid = zip_add(zip.handle(), fname.c_str(), zipSource.handle());
+    if(fid<0)
+    {
+        zip_source_free(zipSource.handle());
+        throw std::runtime_error("Error creating "+name+" array");
+    }
+
+    zip.close();
+}
+
+
 
 cnpy::NpArrayDict cnpy::npz_load(const std::string& fname)
 {
