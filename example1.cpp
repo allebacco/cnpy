@@ -18,8 +18,6 @@ int main()
     for(int i = 0;i < Nx*Ny*Nz;i++)
         data[i] = std::complex<double>(rand(),rand());
 
-    std::cout<<"sizeof(size_t): "<<sizeof(size_t)<<std::endl;
-
     //save it to file
     const std::vector<size_t> shape = {Nz, Ny, Nx};
     cnpy::npy_save("arr1.npy",data, shape, 'w');
@@ -32,7 +30,8 @@ int main()
     assert(arr.elemSize() == sizeof(std::complex<double>));
     assert(arr.nDims() == 3 && arr.shape(0) == Nz && arr.shape(1) == Ny && arr.shape(2) == Nx);
     for(int i = 0; i < Nx*Ny*Nz;i++)
-        assert(data[i] == loaded_data[i]);
+        if(data[i] != loaded_data[i])
+            throw std::runtime_error("data[i] != loaded_data[i]");
 
     //append the same data to file
     //npy array on file now has shape (Nz+Nz,Ny,Nx)
@@ -52,9 +51,12 @@ int main()
 
     cnpy::NpArray npMyVar1 = cnpy::npz_load("out.npz", "myVar1");
     double* myVar1Data = reinterpret_cast<double*>(npMyVar1.data());
-    assert(npMyVar1.nDims() == 1 && npMyVar1.shape(0) == 1);
-    assert(myVar1Data[0] == myVar1);
-    assert(npMyVar1.size()==sizeof(double));
+    if(npMyVar1.nDims() != 1 || npMyVar1.shape(0) != 1)
+        throw std::runtime_error("npMyVar1.nDims() != 1 || npMyVar1.shape(0) != 1");
+    if(myVar1Data[0] != myVar1)
+        throw std::runtime_error("myVar1Data[0] != myVar1");
+    if(npMyVar1.size()!=sizeof(double))
+        throw std::runtime_error("npMyVar1.size()!=sizeof(double): ");
 
     //load the entire npz file
     cnpy::NpArrayDict my_npz = cnpy::npz_load("out.npz");
@@ -62,8 +64,10 @@ int main()
     //check that the loaded myVar1 matches myVar1
     cnpy::NpArray& arr_mv1 = my_npz["myVar1"];
     double* mv1 = reinterpret_cast<double*>(arr_mv1.data());
-    assert(arr_mv1.nDims() == 1 && arr_mv1.shape(0) == 1);
-    assert(mv1[0] == myVar1);
+    if(arr_mv1.nDims() != 1 || arr_mv1.shape(0) != 1)
+        throw std::runtime_error("arr_mv1.nDims() != 1 || arr_mv1.shape(0) != 1");
+    if(mv1[0] != myVar1)
+        throw std::runtime_error("mv1[0] != myVar1");
 
     return 0;
 }

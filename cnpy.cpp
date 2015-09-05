@@ -2,28 +2,27 @@
 //Released under MIT License
 //license available in LICENSE file, or at http://www.opensource.org/licenses/mit-license.php
 
+/*
+ * The orignal cnpy library was modified by
+ * Alessandro Bacchini, allebacco@gmail.com
+ */
+
 #include "cnpy.h"
 
-#include <complex>
 #include <cstdlib>
-#include <cstring>
 #include <iomanip>
 #include <stdexcept>
 #include <sstream>
 #include <cstdio>
 #include <cassert>
 #include <fstream>
+#include <iostream>
 
-#include <zlib.h>
 #include <zip.h>
-#include <zzip/zzip.h>
+
 
 typedef std::pair<std::string, cnpy::NpArray> NpArrayDictItem;
 
-static int closefile(int fp)
-{
-    return ::close(fp);
-}
 
 static int closefile(std::FILE* fp)
 {
@@ -43,7 +42,6 @@ static int closefile(struct zip_file* fp)
 static int closefile(struct zip_source* fp)
 {
     // zip_source is reference counted.
-    //zip_source_free(fp);
     return 0;
 }
 
@@ -113,34 +111,6 @@ static char map_type(const cnpy::Type& t)
     default:
         return '?';
     }
-}
-
-template<typename T> static std::vector<char>& operator+=(std::vector<char>& lhs, const T rhs) {
-    //write in little endian
-    for(char byte = 0; byte < sizeof(T); byte++) {
-        char val = *((char*)&rhs+byte);
-        lhs.push_back(val);
-    }
-    return lhs;
-}
-
-
-template<> std::vector<char>& operator+=(std::vector<char>& lhs, const std::string rhs)
-{
-    lhs.insert(lhs.end(),rhs.begin(),rhs.end());
-    return lhs;
-}
-
-
-template<> std::vector<char>& operator+=(std::vector<char>& lhs, const char* rhs)
-{
-    //write in little endian
-    size_t len = strlen(rhs);
-    lhs.reserve(len);
-    for(size_t byte = 0; byte < len; byte++) {
-        lhs.push_back(rhs[byte]);
-    }
-    return lhs;
 }
 
 
@@ -275,46 +245,34 @@ static void parseDictHeader(const std::string& dict, size_t& word_size, std::vec
 }
 
 
-static void parse_zip_footer(FILE* fp, unsigned short& nrecs, unsigned int& global_header_size, unsigned int& global_header_offset)
-{
-    std::vector<char> footer(22);
-    fseek(fp,-22,SEEK_END);
-    size_t res = fread(&footer[0],sizeof(char),22,fp);
-    if(res != 22)
-        throw std::runtime_error("parse_zip_footer: failed fread");
-
-    unsigned short disk_no, disk_start, nrecs_on_disk, comment_len;
-    disk_no = *(unsigned short*) &footer[4];
-    disk_start = *(unsigned short*) &footer[6];
-    nrecs_on_disk = *(unsigned short*) &footer[8];
-    nrecs = *(unsigned short*) &footer[10];
-    global_header_size = *(unsigned int*) &footer[12];
-    global_header_offset = *(unsigned int*) &footer[16];
-    comment_len = *(unsigned short*) &footer[20];
-
-    assert(disk_no == 0);
-    assert(disk_start == 0);
-    assert(nrecs_on_disk == nrecs);
-    assert(comment_len == 0);
-}
-
-
-static cnpy::NpArray load_the_npy_file(std::FILE* fp)
+static cnpy::NpArray load_the_npy_file(Handler<std::FILE>& npyFile)
 {
     std::vector<size_t> shape;
     size_t word_size;
     bool fortran_order;
-    parse_npy_header(fp, word_size, shape, fortran_order);
+
+    NpHeader header;
+    zip_int64_t nread = std::fread(&header, sizeof(NpHeader), 1, npyFile.handle());
+    if(nread != 1)
+         throw std::runtime_error("Error reading npy header");
+
+    std::string dict;
+    dict.resize(header.dictSize, ' ');
+    nread = std::fread(&dict[0], sizeof(char), header.dictSize, npyFile.handle());
+    if(nread != header.dictSize)
+         throw std::runtime_error("Error reading npy dict header");
+
+    parseDictHeader(dict, word_size, shape, fortran_order);
 
     cnpy::NpArray arr(shape, word_size, fortran_order);
 
-    const size_t num = arr.numElements();
-    const size_t nread = std::fread(arr.data(), word_size, num, fp);
-    if(nread != num)
-        throw std::runtime_error("npy file read error: expected "+std::to_string(arr.size())+", read "+std::to_string(nread));
+    nread = std::fread(arr.data(), arr.elemSize(), arr.numElements(), npyFile.handle());
+    if(nread != arr.numElements())
+        throw std::runtime_error("npy file read error: expected "+std::to_string(arr.numElements())+", read "+std::to_string(nread));
 
     return arr;
 }
+
 
 static cnpy::NpArray load_the_npy_file(Handler<struct zip_file>& zipFile)
 {
@@ -395,104 +353,6 @@ void cnpy::npy_save_data(const std::string& fname,
     fclose(fp);
 }
 
-/*
-void cnpy::npz_save_data(const std::string& zipname, const std::string& name,
-                         const unsigned char* data, const cnpy::Type dtype,
-                         const size_t elemSize, const std::vector<size_t>& shape,
-                         const char mode)
-{
-    //first, append a .npy to the fname
-    std::string fname(name);
-    fname += ".npy";
-
-    //now, on with the show
-    FILE* fp = NULL;
-    unsigned short nrecs = 0;
-    unsigned int global_header_offset = 0;
-    std::vector<char> global_header;
-
-    if(mode == 'a')
-        fp = fopen(zipname.c_str(), "r+b");
-
-    if(fp)
-    {
-        //zip file exists. we need to add a new npy file to it.
-        //first read the footer. this gives us the offset and size of the global header
-        //then read and store the global header.
-        //below, we will write the the new data at the start of the global header then append the global header and footer below it
-        unsigned int global_header_size;
-        parse_zip_footer(fp, nrecs, global_header_size, global_header_offset);
-        fseek(fp, global_header_offset, SEEK_SET);
-        global_header.resize(global_header_size);
-        size_t res = fread(global_header.data(), sizeof(char), global_header_size, fp);
-        if(res != global_header_size)
-            throw std::runtime_error("npz_save: header read error while adding to existing zip");
-
-        fseek(fp, global_header_offset, SEEK_SET);
-    }
-    else
-    {
-        fp = fopen(zipname.c_str(), "wb");
-    }
-
-    std::vector<char> npy_header = create_npy_header(dtype, elemSize, shape);
-
-    size_t nels = std::accumulate(shape.cbegin(), shape.cend(), 1U, std::multiplies<size_t>());
-    size_t nbytes = nels*elemSize + npy_header.size();
-
-    //get the CRC of the data to be added
-    unsigned int crc = crc32(0L, (unsigned char*)npy_header.data(), npy_header.size());
-    crc = crc32(crc, data, nels*elemSize);
-
-    //build the local header
-    std::vector<char> local_header;
-    local_header += "PK"; //first part of sig
-    local_header += (unsigned short) 0x0403; //second part of sig
-    local_header += (unsigned short) 20; //min version to extract
-    local_header += (unsigned short) 0; //general purpose bit flag
-    local_header += (unsigned short) 0; //compression method
-    local_header += (unsigned short) 0; //file last mod time
-    local_header += (unsigned short) 0;     //file last mod date
-    local_header += (unsigned int) crc; //crc
-    local_header += (unsigned int) nbytes; //compressed size
-    local_header += (unsigned int) nbytes; //uncompressed size
-    local_header += (unsigned short) fname.size(); //fname length
-    local_header += (unsigned short) 0; //extra field length
-    local_header += fname;
-
-    //build global header
-    global_header += "PK"; //first part of sig
-    global_header += (unsigned short) 0x0201; //second part of sig
-    global_header += (unsigned short) 20; //version made by
-    global_header.insert(global_header.end(),local_header.begin()+4,local_header.begin()+30);
-    global_header += (unsigned short) 0; //file comment length
-    global_header += (unsigned short) 0; //disk number where file starts
-    global_header += (unsigned short) 0; //internal file attributes
-    global_header += (unsigned int) 0; //external file attributes
-    global_header += (unsigned int) global_header_offset; //relative offset of local file header, since it begins where the global header used to begin
-    global_header += fname;
-
-    //build footer
-    std::vector<char> footer;
-    footer += "PK"; //first part of sig
-    footer += (unsigned short) 0x0605; //second part of sig
-    footer += (unsigned short) 0; //number of this disk
-    footer += (unsigned short) 0; //disk where footer starts
-    footer += (unsigned short) (nrecs+1); //number of records on this disk
-    footer += (unsigned short) (nrecs+1); //total number of records
-    footer += (unsigned int) global_header.size(); //nbytes of global headers
-    footer += (unsigned int) (global_header_offset + nbytes + local_header.size()); //offset of start of global headers, since global header now starts after newly written array
-    footer += (unsigned short) 0; //zip file comment length
-
-    //write everything
-    fwrite(local_header.data(), sizeof(char), local_header.size(), fp);
-    fwrite(npy_header.data(), sizeof(char), npy_header.size(), fp);
-    fwrite(data, elemSize, nels, fp);
-    fwrite(global_header.data(), sizeof(char), global_header.size(), fp);
-    fwrite(footer.data(), sizeof(char), footer.size(), fp);
-    fclose(fp);
-}
-*/
 
 class ZipSourceCallbackData
 {
@@ -505,7 +365,7 @@ public:
         headerIsDone(false)
     {}
 
-    const std::vector<char> header;
+    const std::vector<char>& header;
     const unsigned char* data;
     const size_t dataSize;
 
@@ -518,13 +378,10 @@ static zip_int64_t zipSourceCallback(void* userdata, void* data, zip_uint64_t le
     ZipSourceCallbackData* cbData = reinterpret_cast<ZipSourceCallbackData*>(userdata);
     switch (cmd) {
     case ZIP_SOURCE_OPEN:
-        std::cout<<"ZIP_SOURCE_OPEN"<<std::endl;
         cbData->offset = 0;
         cbData->headerIsDone = false;
-        std::cout<<"\t"<<cbData->header.size()<<" "<<cbData->dataSize<<std::endl;
         break;
     case ZIP_SOURCE_READ: {
-        std::cout<<"ZIP_SOURCE_READ "<<len<<" ";
         if(cbData->headerIsDone)
         {
             size_t remain = cbData->dataSize-cbData->offset;
@@ -532,7 +389,6 @@ static zip_int64_t zipSourceCallback(void* userdata, void* data, zip_uint64_t le
             if(toCopy>0)
                 std::memcpy(data, &cbData->data[cbData->offset], toCopy);
             cbData->offset += toCopy;
-            std::cout<<toCopy<<" "<<cbData->offset<<" d"<<std::endl;
             return toCopy;
         }
         else
@@ -547,29 +403,22 @@ static zip_int64_t zipSourceCallback(void* userdata, void* data, zip_uint64_t le
                 cbData->headerIsDone = true;
                 cbData->offset = 0;
             }
-            std::cout<<toCopy<<" "<<cbData->offset<<" h"<<std::endl;
             return toCopy;
         }
     }
     case ZIP_SOURCE_CLOSE:
-        std::cout<<"ZIP_SOURCE_CLOSE"<<std::endl;
         break;
     case ZIP_SOURCE_STAT: {
-        std::cout<<"ZIP_SOURCE_STAT"<<std::endl;
         struct zip_stat* zs = reinterpret_cast<struct zip_stat*>(data);
         zip_stat_init(zs);
         zs->encryption_method = ZIP_EM_NONE;
-        //zs->index;			/* index within archive */
         zs->size = cbData->dataSize + cbData->header.size(); /* size of file (uncompressed) */
-        //zs->comp_size;		/* size of file (compressed) */
         zs->mtime = std::time(nullptr);
-        //zs->crc;			/* crc of file data */
         zs->comp_method = ZIP_CM_STORE; /* compression method used */
         zs->valid = ZIP_STAT_SIZE | ZIP_STAT_MTIME | ZIP_STAT_COMP_METHOD | ZIP_STAT_ENCRYPTION_METHOD;
         return 0;
     }
     case ZIP_SOURCE_ERROR:
-        std::cout<<"ZIP_SOURCE_ERROR"<<std::endl;
         break;
     default:
         break;
@@ -669,16 +518,10 @@ cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varnam
 
 cnpy::NpArray cnpy::npy_load(const std::string& fname)
 {
-    FILE* fp = fopen(fname.c_str(), "rb");
-
-    if(!fp) {
-        printf("npy_load: Error! Unable to open file %s!\n",fname.c_str());
-        return NpArray();
-    }
+    Handler<std::FILE> fp = std::fopen(fname.c_str(), "r");
 
     NpArray arr = load_the_npy_file(fp);
 
-    fclose(fp);
     return arr;
 }
 

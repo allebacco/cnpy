@@ -2,21 +2,30 @@
 //Released under MIT License
 //license available in LICENSE file, or at http://www.opensource.org/licenses/mit-license.php
 
+/*
+ * The orignal cnpy library was modified by
+ * Alessandro Bacchini, allebacco@gmail.com
+ */
+
 #ifndef LIBCNPY_H_
 #define LIBCNPY_H_
 
-#include <cstring>
+
 #include <string>
+#include <cstring>
 #include <vector>
 #include <type_traits>
-#include <iostream>
-#include <algorithm>
 #include <complex>
 #include <map>
+#include <algorithm>
+
 
 namespace cnpy
 {
 
+/**
+ * @brief Supported datatypes.
+ */
 enum class Type
 {
     Void,   //!< Void datatype with undefined size.
@@ -37,6 +46,15 @@ enum class Type
     Bool    //!< Boolean (1 byte)
 };
 
+/**
+ * @brief Conversion from C type to cnpy::Type enum.
+ * @return The cnpy::Type that reflect the C type.
+ *
+ * Example:
+ * @code{.cpp}
+ * cnpy::Type the_type_for_int = cnpy::type<int>();
+ * @endcode
+ */
 template<typename _Tp> static Type type()
 {
     if(std::is_same<_Tp, int8_t>::value)
@@ -72,12 +90,36 @@ template<typename _Tp> static Type type()
     return cnpy::Type::Void;
 }
 
-
-
-
+/**
+ * @brief The NpArray class
+ *
+ * Container class for the data read from the `npy` and `npz` files.
+ *
+ * The NpArray usually deallocate its data when destroyed. However,
+ * it is possible to move the responsibility of deleting data from
+ * the class to the developer.
+ *
+ * @code{.cpp}
+ * NpArray arr = npy_load("arr.npy");
+ * float* data = arr.data(); // Take a pointer to the data
+ * arr.revokeDataOwnership(); // Take the responsibility of deleting data
+ * ...
+ * delete[] data; // Delete the data
+ * // Do not use NpArray::data() anymore because it points to
+ * // an unallocated memory zone
+ * @endcode
+ *
+ * @note
+ * Do not use NpArray::data() if the data ownership has been revoked from the
+ * NpArray class instance.
+ *
+ */
 class NpArray
 {
 public:
+    /**
+     * @brief Constructor for an empty NpArray
+     */
     NpArray() :
         mData(nullptr),
         mElemSize(0),
@@ -86,6 +128,15 @@ public:
         mHasDataOwnership(true)
     {}
 
+    /**
+     * @brief Constructor for a NpArray
+     * @param shape Shape of the data
+     * @param elSize Size of each element
+     * @param isFortran true if the data is in fortran order (col-majour)
+     * @param data The data to copy in the array
+     *
+     *
+     */
     NpArray(const std::vector<size_t>& shape,
             const size_t elSize,
             const bool isFortran=false,
@@ -96,9 +147,7 @@ public:
         mHasDataOwnership(true)
     {
         mDataSize = std::accumulate(mShape.begin(), mShape.end(), mElemSize, std::multiplies<size_t>());
-
         mData = new unsigned char[mDataSize];
-
         if(data!=nullptr)
             std::memcpy(mData, data, mDataSize);
     }
@@ -111,41 +160,102 @@ public:
 
     NpArray(NpArray&& other)
     {
-        swapData(other);
+        move(other);
     }
 
     NpArray& operator=(NpArray&& other)
     {
-        swapData(other);
+        move(other);
         return *this;
     }
 
-    unsigned char* data() { return mData; }
-    const unsigned char* data() const { return mData; }
-
-    size_t shape(const size_t i) const { return mShape[i]; }
-    size_t nDims() const { return mShape.size(); }
-    size_t numElements() const
-    {
-        return std::accumulate(mShape.begin(), mShape.end(), 1U, std::multiplies<size_t>());
+    /**
+     * @brief data
+     * @return Pointer to the data read from the `npy` or `npz` file.
+     * @throws std::runtime_error If the ownership of the data has been revoked from instance of NpArray
+     */
+    unsigned char* data() {
+        if (mHasDataOwnership==false)
+            throw std::runtime_error("The data ownership has been revoked from the NpArray instance");
+        return mData;
     }
+
+    /**
+     * @brief data
+     * @return Pointer to the data read from the `npy` or `npz` file.
+     * @throws std::runtime_error If the ownership of the data has been revoked from instance of NpArray
+     */
+    const unsigned char* data() const {
+        if (mHasDataOwnership==false)
+            throw std::runtime_error("The data ownership has been revoked from the NpArray instance");
+        return mData;
+    }
+
+    /**
+     * @brief Size of the array in the dimension.
+     * @param i Dimension
+     * @return The size of the NpArray in the dimension `i`
+     */
+    size_t shape(const size_t i) const { return mShape[i]; }
+
+    /**
+     * @brief Number of dimensions
+     * @return The Number of dimensions
+     */
+    size_t nDims() const { return mShape.size(); }
+
+    /**
+     * @brief Number of elements in the NpArray
+     * @return The number of elements
+     */
+    size_t numElements() const { return mDataSize/mElemSize; }
+
+    /**
+     * @brief Size in byte of each element
+     * @return The size in byte of each element
+     */
     size_t elemSize() const { return mElemSize; }
+
+    /**
+     * @brief Size in byte of the data in the NpArray
+     * @return The size in byte of the data
+     */
     size_t size() const { return mDataSize; }
+
+    /**
+     * @brief Order of teh data in the NpArray
+     * @return true if the data is in column-major order (FORTRAN), false if the
+     *         data is in row-major order (C)
+     */
     bool isFortranOrder() const { return mIsFortranOrder; }
+
+    /**
+     * @brief Data ownership
+     * @return true if the NpArray instance has the responsibility of deallocate
+     *         internal data when destructed
+     */
     bool hasDataOwnership() const { return mHasDataOwnership; }
 
-    void removeDataOwnership() { mHasDataOwnership = false; }
+    /**
+     * @brief Revoke the responsibility of deleting internal data from the
+     *        NpArray instance
+     */
+    void revokeDataOwnership() { mHasDataOwnership = false; }
 
+    /**
+     * @brief Check if the NpArray instance is empty
+     * @return true if the NpArray is empty
+     */
     bool empty() { return mData==nullptr; }
 
 private:
 
-    void swapData(NpArray& other)
+    void move(NpArray& other)
     {
         mData = other.mData;
         other.mData = nullptr;
 
-        std::swap(mShape, other.mShape);
+        mShape = std::move(other.mShape);
 
         mElemSize = other.mElemSize;
         other.mElemSize = 0;
