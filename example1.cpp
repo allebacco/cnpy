@@ -25,10 +25,14 @@ int main()
     //load it into a new array
     cnpy::NpArray arr = cnpy::npy_load("arr1.npy");
     std::complex<double>* loaded_data = reinterpret_cast<std::complex<double>*>(arr.data());
-    
+
     //make sure the loaded data matches the saved data
-    assert(arr.elemSize() == sizeof(std::complex<double>));
-    assert(arr.nDims() == 3 && arr.shape(0) == Nz && arr.shape(1) == Ny && arr.shape(2) == Nx);
+    if(arr.elemSize() != sizeof(std::complex<double>))
+        throw std::runtime_error("arr.elemSize() != sizeof(std::complex<double>)");
+    if(arr.nDims() != 3 || arr.shape(0) != Nz || arr.shape(1) != Ny || arr.shape(2) != Nx)
+        throw std::runtime_error("arr.nDims() != 3 || arr.shape(0) != Nz || arr.shape(1) != Ny || arr.shape(2) != Nx");
+    if(arr.dtype() != cnpy::Type::ComplexDouble)
+        throw std::runtime_error("arr.dtype() != cnpy::Type::ComplexDouble "+std::to_string((int)arr.dtype()));
     for(int i = 0; i < Nx*Ny*Nz;i++)
         if(data[i] != loaded_data[i])
             throw std::runtime_error("data[i] != loaded_data[i]");

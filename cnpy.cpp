@@ -113,6 +113,57 @@ static char map_type(const cnpy::Type& t)
     }
 }
 
+static cnpy::Type descr2Type(const char c, const size_t byteSize)
+{
+    std::cout<<"descr2Type "<<c<<" "<<byteSize<<std::endl;
+    switch (c)
+    {
+    case 'i':
+        switch (byteSize)
+        {
+        case sizeof(int8_t): return cnpy::Type::Int8;
+        case sizeof(int16_t): return cnpy::Type::Int16;
+        case sizeof(int32_t): return cnpy::Type::Int32;
+        case sizeof(int64_t): return cnpy::Type::Int64;
+        default: return cnpy::Type::Void;
+        }
+        break;
+    case 'u':
+        switch (byteSize)
+        {
+        case sizeof(uint8_t): return cnpy::Type::Uint8;
+        case sizeof(uint16_t): return cnpy::Type::Uint16;
+        case sizeof(uint32_t): return cnpy::Type::Uint32;
+        case sizeof(uint64_t): return cnpy::Type::Uint64;
+        default: return cnpy::Type::Void;
+        }
+        break;
+    case 'f':
+        switch (byteSize)
+        {
+        case sizeof(float): return cnpy::Type::Float;
+        case sizeof(double): return cnpy::Type::Double;
+        case sizeof(long double): return cnpy::Type::LongDouble;
+        default: return cnpy::Type::Void;
+        }
+        break;
+    case 'c':
+        switch (byteSize)
+        {
+        case sizeof(std::complex<float>): return cnpy::Type::ComplexFloat;
+        case sizeof(std::complex<double>): return cnpy::Type::ComplexDouble;
+        case sizeof(std::complex<long double>): return cnpy::Type::ComplexLongDouble;
+        default: return cnpy::Type::Void;
+        }
+        break;
+    case 'b':
+        if(byteSize == sizeof(bool)) return cnpy::Type::Bool;
+        else return cnpy::Type::Void;
+    default:
+        return cnpy::Type::Void;
+    }
+}
+
 
 template<typename T> std::string tostring(T i, int pad = 0, char padval = ' ')
 {
@@ -191,7 +242,7 @@ static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_
     }
 
     //endian, word size, data type
-    //byte order code | stands for not applicable. 
+    //byte order code | stands for not applicable.
     //not sure when this applies except for byte array
     loc1 = header.find("descr")+9;
     bool littleEndian = header[loc1] == '<' || header[loc1] == '|';//;) // ? true : false);
@@ -204,7 +255,7 @@ static void parse_npy_header(std::FILE* fp, size_t& word_size, std::vector<size_
     word_size = std::stoull(str_ws.substr(0,loc2));
 }
 
-static void parseDictHeader(const std::string& dict, size_t& word_size, std::vector<size_t>& shape, bool& fortran_order)
+static void parseDictHeader(const std::string& dict, size_t& word_size, std::vector<size_t>& shape, bool& fortran_order, char& elType)
 {
     int loc1, loc2;
 
@@ -229,15 +280,13 @@ static void parseDictHeader(const std::string& dict, size_t& word_size, std::vec
         str_shape = str_shape.substr(loc1+1);
     }
 
-    //endian, word size, data type
-    //byte order code | stands for not applicable.
-    //not sure when this applies except for byte array
+    // byte order code | stands for not applicable.
     loc1 = dict.find("descr")+9;
     bool littleEndian = dict[loc1] == '<' || dict[loc1] == '|';
     if(!littleEndian)
         throw std::runtime_error("Big endian data can note be managed.");
 
-    //char type = dict[loc1+1];
+    elType = dict[loc1+1];
 
     std::string str_ws = dict.substr(loc1+2);
     loc2 = str_ws.find("'");
@@ -262,9 +311,10 @@ static cnpy::NpArray load_the_npy_file(Handler<std::FILE>& npyFile)
     if(nread != header.dictSize)
          throw std::runtime_error("Error reading npy dict header");
 
-    parseDictHeader(dict, word_size, shape, fortran_order);
+    char elType;
+    parseDictHeader(dict, word_size, shape, fortran_order, elType);
 
-    cnpy::NpArray arr(shape, word_size, fortran_order);
+    cnpy::NpArray arr(shape, word_size, descr2Type(elType, word_size), fortran_order);
 
     nread = std::fread(arr.data(), arr.elemSize(), arr.numElements(), npyFile.handle());
     if(nread != arr.numElements())
@@ -291,9 +341,10 @@ static cnpy::NpArray load_the_npy_file(Handler<struct zip_file>& zipFile)
     if(nread != header.dictSize)
          throw std::runtime_error("Error reading npy dict header in npz file");
 
-    parseDictHeader(dict, word_size, shape, fortran_order);
+    char elType;
+    parseDictHeader(dict, word_size, shape, fortran_order, elType);
 
-    cnpy::NpArray arr(shape, word_size, fortran_order);
+    cnpy::NpArray arr(shape, word_size, descr2Type(elType, word_size), fortran_order);
 
     nread = zip_fread(zipFile.handle(), arr.data(), arr.size());
     if(nread != arr.size())

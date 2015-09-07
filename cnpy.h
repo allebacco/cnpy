@@ -18,6 +18,8 @@
 #include <complex>
 #include <map>
 #include <algorithm>
+#include <iostream>
+#include <climits>
 
 
 namespace cnpy
@@ -57,6 +59,13 @@ enum class Type
  */
 template<typename _Tp> static Type type()
 {
+    if(std::is_same<_Tp, char>::value)
+    {
+        if(std::numeric_limits<char>::is_signed)
+            return Type::Int8;
+        else
+            return Type::Uint8;
+    }
     if(std::is_same<_Tp, int8_t>::value)
         return Type::Int8;
     if(std::is_same<_Tp, int16_t>::value)
@@ -125,6 +134,7 @@ public:
         mElemSize(0),
         mDataSize(0),
         mIsFortranOrder(false),
+        mDtype(Type::Void),
         mHasDataOwnership(true)
     {}
 
@@ -139,13 +149,17 @@ public:
      */
     NpArray(const std::vector<size_t>& shape,
             const size_t elSize,
+            const Type dataType,
             const bool isFortran=false,
             const unsigned char* data=nullptr) :
         mShape(shape),
         mElemSize(elSize),
         mIsFortranOrder(isFortran),
+        mDtype(dataType),
         mHasDataOwnership(true)
     {
+        std::cout<<"Dtype "<<(int)mDtype<<std::endl;
+
         mDataSize = std::accumulate(mShape.begin(), mShape.end(), mElemSize, std::multiplies<size_t>());
         mData = new unsigned char[mDataSize];
         if(data!=nullptr)
@@ -246,7 +260,9 @@ public:
      * @brief Check if the NpArray instance is empty
      * @return true if the NpArray is empty
      */
-    bool empty() { return mData==nullptr; }
+    bool empty() const { return mData==nullptr; }
+
+    Type dtype() const { return mDtype; }
 
 private:
 
@@ -272,6 +288,7 @@ private:
     size_t mElemSize;
     size_t mDataSize;
     bool mIsFortranOrder;
+    Type mDtype;
 
     bool mHasDataOwnership;
 };
