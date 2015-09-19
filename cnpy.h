@@ -158,8 +158,6 @@ public:
         mDtype(dataType),
         mHasDataOwnership(true)
     {
-        std::cout<<"Dtype "<<(int)mDtype<<std::endl;
-
         mDataSize = std::accumulate(mShape.begin(), mShape.end(), mElemSize, std::multiplies<size_t>());
         mData = new unsigned char[mDataSize];
         if(data!=nullptr)

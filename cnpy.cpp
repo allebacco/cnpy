@@ -115,7 +115,6 @@ static char map_type(const cnpy::Type& t)
 
 static cnpy::Type descr2Type(const char c, const size_t byteSize)
 {
-    std::cout<<"descr2Type "<<c<<" "<<byteSize<<std::endl;
     switch (c)
     {
     case 'i':
@@ -373,10 +372,8 @@ void cnpy::npy_save_data(const std::string& fname,
         parse_npy_header(fp, word_size, tmp_shape, fortran_order);
         assert(!fortran_order);
 
-        if(word_size != elemSize) {
-            std::cout<<"libnpy error: "<<fname<<" has word size "<<word_size<<" but npy_save appending data sized "<<elemSize<<"\n";
-            assert( word_size == elemSize );
-        }
+        if(word_size != elemSize)
+            throw std::runtime_error("Attempting to append misdimensioned data to "+fname);
         if(tmp_shape.size() != shape.size())
             throw std::runtime_error("Attempting to append misdimensioned data to "+fname);
 
@@ -570,6 +567,8 @@ cnpy::NpArray cnpy::npz_load(const std::string& fname, const std::string& varnam
 cnpy::NpArray cnpy::npy_load(const std::string& fname)
 {
     Handler<std::FILE> fp = std::fopen(fname.c_str(), "r");
+    if(fp.handle()==NULL)
+        throw std::runtime_error("Error opening npy file "+fname);
 
     NpArray arr = load_the_npy_file(fp);
 
